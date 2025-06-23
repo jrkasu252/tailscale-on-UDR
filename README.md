@@ -85,20 +85,6 @@ chmod +x /mnt/data/on_boot.d/99-tailscale.sh
 
 ---
 
-### 4. Enable at Boot (via `crontab`)
-
-```sh
-crontab -e
-```
-
-Add this line:
-
-```sh
-@reboot /mnt/data/on_boot.d/99-tailscale.sh
-```
-
----
-
 ## ✅ Testing
 
 * Run manually to test:
