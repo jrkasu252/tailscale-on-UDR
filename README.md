@@ -1,36 +1,41 @@
-# Tailscale on UniFi Dream Router (UDR) with Exit Node + Auto-Update
+# Tailscale on UniFi Dream Router (UDR)
 
-This guide helps you install **Tailscale** persistently on a **UniFi Dream Router (UDR)** running UniFi OS, with:
-
-* ✅ Persistent install in `/mnt/data/tailscale`
-* 🌐 Exit Node support (`--advertise-exit-node`)
-* 🔄 Auto-update to the latest stable Tailscale release
-* ↺ Startup script that runs on every reboot
+> This guide explains how to install and persistently run the latest version of [Tailscale](https://tailscale.com) on a UniFi Dream Router (UDR) running UbiOS. It includes steps for enabling exit node, SSH access, and automatic updates.
 
 ---
 
-## ⚙️ Requirements
+## ✅ Prerequisites
 
-* UDR running UniFi OS 4.x+
-* SSH access
-* Architecture: `aarch64` (ARM64)
+* A UniFi Dream Router (UDR) running **UbiOS** (tested on v4.2.14)
+* SSH access enabled on the UDR (via UniFi Network web UI)
+* A Tailscale account
 
 ---
 
-## 💪 Installation Steps
+## 🚪 Step 1: SSH into your UDR
 
-### 1. Create Persistent Tailscale Folder
+Enable SSH in the UniFi web UI (Settings > Advanced > SSH), then connect:
 
-```sh
-mkdir -p /mnt/data/tailscale
-cd /mnt/data/tailscale
+```bash
+ssh root@<UDR-IP>
 ```
 
 ---
 
-### 2. Create Auto-Update Script
+## 📁 Step 2: Set Up Persistent Folders
 
-```sh
+```bash
+mkdir -p /mnt/data/tailscale
+mkdir -p /mnt/data/on_boot.d
+```
+
+---
+
+## ⬇️ Step 3: Install Latest Tailscale (for ARM64)
+
+Create the update script:
+
+```bash
 cat <<'EOF' > /mnt/data/tailscale/update-tailscale.sh
 #!/bin/sh
 
@@ -39,6 +44,7 @@ INSTALL_DIR=/mnt/data/tailscale
 
 LATEST=$(curl -fsSL https://pkgs.tailscale.com/stable/ | grep -oE "tailscale_[0-9.]+_${ARCH}.tgz" | sort -V | tail -1)
 VERSION=$(echo "$LATEST" | cut -d_ -f2)
+
 CURRENT=$($INSTALL_DIR/tailscale version 2>/dev/null | head -n1)
 
 if echo "$CURRENT" | grep -q "$VERSION"; then
@@ -50,15 +56,9 @@ echo "Updating to Tailscale v$VERSION..."
 
 cd "$INSTALL_DIR"
 curl -fsSL "https://pkgs.tailscale.com/stable/$LATEST" | tar xz
-
-# Move binaries regardless of archive structure
-if [ -f tailscale ]; then
-  echo "Binaries already in current directory"
-else
-  mv tailscale*/tailscale .
-  mv tailscale*/tailscaled .
-  rm -rf tailscale_*
-fi
+mv tailscale*/tailscale .
+mv tailscale*/tailscaled .
+rm -rf tailscale*
 
 echo "Tailscale updated to v$VERSION"
 EOF
@@ -66,18 +66,42 @@ EOF
 chmod +x /mnt/data/tailscale/update-tailscale.sh
 ```
 
+Run it once to install:
+
+```bash
+/mnt/data/tailscale/update-tailscale.sh
+```
+
 ---
 
-### 3. Create Startup Script for Reboots
+## ⚙️ Step 4: Create Persistent Boot Script
 
-```sh
-mkdir -p /mnt/data/on_boot.d
+```bash
 cat <<'EOF' > /mnt/data/on_boot.d/99-tailscale.sh
 #!/bin/sh
-/mnt/data/tailscale/update-tailscale.sh
-/mnt/data/tailscale/tailscaled --state=/mnt/data/tailscaled.state --socket=/run/tailscale/tailscaled.sock &
+
+echo "[BOOT] Tailscale starting..." >> /mnt/data/tailscale/boot.log
+
+# Cleanup from previous boots
+ip link delete tailscale0 2>/dev/null
+pkill -f tailscaled
+rm -rf /run/tailscale
+mkdir -p /run/tailscale
+
+# Update to latest
+/mnt/data/tailscale/update-tailscale.sh >> /mnt/data/tailscale/boot.log 2>&1
+
+# Start daemon
+/mnt/data/tailscale/tailscaled \
+  --state=/mnt/data/tailscaled.state \
+  --socket=/run/tailscale/tailscaled.sock >> /mnt/data/tailscale/boot.log 2>&1 &
+
 sleep 3
-/mnt/data/tailscale/tailscale up --advertise-exit-node --ssh
+
+# Bring up Tailscale with exit node and SSH
+/mnt/data/tailscale/tailscale up --advertise-exit-node --ssh >> /mnt/data/tailscale/boot.log 2>&1
+
+echo "[BOOT] Tailscale startup complete" >> /mnt/data/tailscale/boot.log
 EOF
 
 chmod +x /mnt/data/on_boot.d/99-tailscale.sh
@@ -85,56 +109,98 @@ chmod +x /mnt/data/on_boot.d/99-tailscale.sh
 
 ---
 
-## ✅ Testing
+## 🔁 Step 5: Auto-Run on Boot
 
-* Run manually to test:
+Create a master boot script if needed:
 
-  ```sh
-  /mnt/data/on_boot.d/99-tailscale.sh
-  ```
+```bash
+cat <<'EOF' > /mnt/data/on_boot.sh
+#!/bin/sh
+/mnt/data/on_boot.d/99-tailscale.sh &
+EOF
 
-* Check status:
+chmod +x /mnt/data/on_boot.sh
+```
 
-  ```sh
-  /mnt/data/tailscale/tailscale status
-  ```
-
-* Reboot and verify it comes back up:
-
-  ```sh
-  reboot
-  ```
+✅ UbiOS automatically runs `/mnt/data/on_boot.sh` on boot.
 
 ---
 
-## 🧠 Notes
+## 🔍 Step 6: Verify Functionality
 
-* To include subnet routing, add `--advertise-routes=192.168.1.0/24` to the `tailscale up` command.
-* To auto-authenticate without user input, create a [Tailscale auth key](https://login.tailscale.com/admin/settings/authkeys) and use:
+Check status:
 
-  ```sh
-  /mnt/data/tailscale/tailscale up --authkey <YOUR_KEY> --advertise-exit-node --ssh
-  ```
+```bash
+/mnt/data/tailscale/tailscale --socket=/run/tailscale/tailscaled.sock status
+```
 
----
+Check logs:
 
-## 💡 Credits
-
-This setup combines:
-
-* [Tailscale static binary install](https://pkgs.tailscale.com/stable/)
-* UniFi's `/mnt/data` persistent boot scripts
-* Crontab fallback for systems without full `rc.local` support
+```bash
+cat /mnt/data/tailscale/boot.log
+```
 
 ---
 
-## 🧪 Tested On
+## 🔁 Step 7: Reboot to Test Persistence
 
-* UniFi Dream Router (UDR)
-* UniFi OS 4.2.14
-* Kernel 5.4.x
-* Tailscale v1.84.0 (auto-updated)
+```bash
+reboot
+```
+
+After reboot:
+
+```bash
+ls -l /run/tailscale
+/mnt/data/tailscale/tailscale --socket=/run/tailscale/tailscaled.sock status
+```
 
 ---
 
-> PRs and improvements welcome!
+## ✅ Optional: Add Alias for Easier CLI Use
+
+```bash
+echo "alias tailscale='/mnt/data/tailscale/tailscale --socket=/run/tailscale/tailscaled.sock'" >> ~/.profile
+. ~/.profile
+```
+
+Now just run:
+
+```bash
+tailscale status
+```
+
+---
+
+## 🚀 You're Done!
+
+Your UDR now:
+
+* Runs the latest Tailscale
+* Advertises itself as an exit node
+* Restarts automatically on boot
+* Auto-updates on reboot
+
+---
+
+## 🛠 Troubleshooting
+
+* `tailscale status` fails: check if `tailscaled` is running and the socket exists
+* Exit node not advertised? Re-run `tailscale up --advertise-exit-node --ssh`
+* Stuck `tailscale0`? Try: `ip link delete tailscale0`
+
+---
+
+## ❤️ Credits
+
+* [Tailscale](https://tailscale.com)
+* [SierraSoftworks/tailscale-udm](https://github.com/SierraSoftworks/tailscale-udm)
+* Community threads on Reddit & GitHub for persistence tips
+
+---
+
+## 🧠 Improvements
+
+* Add `accept-routes` or subnet routing
+* Use Tailscale Auth Keys for headless provisioning
+* Backup state file `/mnt/data/tailscaled.state`
